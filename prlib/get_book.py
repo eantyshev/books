@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 
-import urllib.request
+import aiohttp
+import asyncio
+
 import sys,re
 from PIL import Image
 import json
@@ -40,6 +42,8 @@ j = json.loads(f_info)
 def tile_img(page, tile):
     return "page%d/%d.jpg" % (page, tile)
 
+
+
 for page, p_info in enumerate(j['pgs']):
     #if page != 0:
     #    continue
@@ -53,25 +57,40 @@ for page, p_info in enumerate(j['pgs']):
     filename = p_info['f']
     zoom = p_info['m']
     new_img = Image.new("RGB", (WID, HEI))
-    i = 0
-    for row in range(tiles_hei):
-        for col in range(tiles_wid):
-            print("Download page %d, tile %d" % (page, i))
-            page_expanded_url = page_url % {'cgi_url': cgi_url,
-                                            'server_path': server_path,
-                                            'file': filename,
-                                            'tile': i, 'zoom': zoom}
-            try:
-                urllib.request.urlretrieve(page_expanded_url,
-                                           filename=tile_img(page, i))
-            except urllib.error.HTTPError:
-                shutil.rmtree("page%d" % page)
-                raise
+
+
+    async def fetch_tile_async(i):
+        print("Download page %d, tile %d" % (page, i))
+        page_expanded_url = page_url % {'cgi_url': cgi_url,
+                                        'server_path': server_path,
+                                        'file': filename,
+                                        'tile': i, 'zoom': zoom}
+        response = async aiohttp.request('GET', page_expanded_url)
+        return await response.read()
+
+
+    async def main():
+        futures = []
+        for row in range(tiles_hei):
+            for col in range(tiles_wid):
+                future = fetch_tile_async(i)
+                futures.append(future)
+                i += 1
+
+        for i, future in enumerate(asyncio.as_completed(futures)):
+            img_data = await future
+            print('tile %d downloaded' % i)
+            with open(tile_img(page, i), "wb") as f:
+                f.write(img_data)
+
             img = Image.open(tile_img(page, i))
             new_img.paste(img, (256*col, 256*row))
-            i += 1
-    new_img.save("page%d.jpg" % page)
-    shutil.rmtree("page%d" % page)        
+
+        new_img.save("page%d.jpg" % page)
+        shutil.rmtree("page%d" % page)        
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
 
 print("Creating {} ...".format(zip_name))
 with ZipFile(zip_name, 'w', ZIP_DEFLATED) as z:
