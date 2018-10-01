@@ -2,7 +2,9 @@
 
 import aiohttp
 import asyncio
+import logging
 
+import urllib.request
 import sys,re
 from PIL import Image
 import json
@@ -11,6 +13,8 @@ import os
 from bs4 import BeautifulSoup
 from zipfile import ZipFile, ZIP_DEFLATED
 import shutil
+
+#logging.basicConfig(level=logging.INFO)
 
 main_url = sys.argv[1]
 
@@ -34,6 +38,12 @@ cgi_url, server_path, info_json_url = [x.replace("\\", "")
 
 page_url = ("%(cgi_url)s?FIF=%(server_path)s/%(file)s&JTL=%(zoom)d,%(tile)d")
 
+HEADERS = {
+'Accept': '*/*',
+'Accept-Encoding': 'gzip, deflate, br',
+'Referer': main_url,
+'Origin': 'https://www.prlib.ru'
+}
 
 f_info = urllib.request.urlopen(info_json_url).read().decode()
 j = json.loads(f_info)
@@ -43,10 +53,12 @@ def tile_img(page, tile):
     return "page%d/%d.jpg" % (page, tile)
 
 
-
 for page, p_info in enumerate(j['pgs']):
-    #if page != 0:
-    #    continue
+    if os.path.exists("page%d.jpg" % page):
+        print("Already downloaded page %d" % page)
+        continue
+    #    break
+    print("Download page %d" % page)
     if not os.path.isdir("page%d" % page):
         os.mkdir("page%d" % page)
     WID = int(p_info['d'][-1]['w'])
@@ -56,41 +68,52 @@ for page, p_info in enumerate(j['pgs']):
     print("%dx%d px, %dx%d tiles" % (WID, HEI, tiles_wid, tiles_hei))
     filename = p_info['f']
     zoom = p_info['m']
-    new_img = Image.new("RGB", (WID, HEI))
 
 
-    async def fetch_tile_async(i):
-        print("Download page %d, tile %d" % (page, i))
+    async def fetch_tile_async(session, sema, i):
         page_expanded_url = page_url % {'cgi_url': cgi_url,
                                         'server_path': server_path,
                                         'file': filename,
                                         'tile': i, 'zoom': zoom}
-        response = async aiohttp.request('GET', page_expanded_url)
-        return await response.read()
+        #print("Download page %d, tile %d: %s" % (page, i, page_expanded_url))
+        async with sema, session.get(page_expanded_url, headers=HEADERS) as resp:
+            sz = 0
+            with open(tile_img(page, i), 'wb') as fd:
+                while True:
+                    chunk = await resp.content.read(1024)
+                    sz += len(chunk)
+                    if not chunk:
+                        break
+                    fd.write(chunk)
+            return sz
 
+    async def load_page(loop):
+        sema = asyncio.Semaphore(5)
+        async with aiohttp.ClientSession(loop=loop) as session:
+            tasks = [fetch_tile_async(session, sema, i) for i in range(tiles_hei * tiles_wid)]
+            results = await asyncio.gather(*tasks)
+            return results
 
-    async def main():
-        futures = []
-        for row in range(tiles_hei):
-            for col in range(tiles_wid):
-                future = fetch_tile_async(i)
-                futures.append(future)
-                i += 1
+    loop = asyncio.get_event_loop()
+    results = loop.run_until_complete(load_page(loop))
+    #loop.close()
+    #for r in results:
+    #    print('size %d' % r)
+    #until_complete(
+    #    tasks
+        # asyncio.wait(tasks)
+    #)
 
-        for i, future in enumerate(asyncio.as_completed(futures)):
-            img_data = await future
-            print('tile %d downloaded' % i)
-            with open(tile_img(page, i), "wb") as f:
-                f.write(img_data)
-
+    new_img = Image.new("RGB", (WID, HEI))
+    for row in range(tiles_hei):
+        for col in range(tiles_wid):
+            i = row * tiles_wid + col
             img = Image.open(tile_img(page, i))
             new_img.paste(img, (256*col, 256*row))
 
-        new_img.save("page%d.jpg" % page)
-        shutil.rmtree("page%d" % page)        
+    new_img.save("page%d.jpg" % page)
+    shutil.rmtree("page%d" % page)        
 
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
 
 print("Creating {} ...".format(zip_name))
 with ZipFile(zip_name, 'w', ZIP_DEFLATED) as z:
